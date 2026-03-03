@@ -1,0 +1,28 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Node.js
+node_modules/
+
+# Vite build output
+app/dist/
+
+# Data files (large binary)
+data/*.tif
+data/*.scog
+data/*.scog.tif
+
+# CEK secrets (server-side keys)
+keys/**/kompsat_3857_ceks.json
+
+# Docs (except README)
+SCOG-*.md
+
+# Claude
+.claude/

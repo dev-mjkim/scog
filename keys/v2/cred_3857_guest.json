@@ -1,0 +1,20 @@
+{
+  "file_id": "kompsat_3857",
+  "public_level": 2,
+  "levels": {},
+  "level_meta": {
+    "2": {
+      "tile_count": 1,
+      "image_width": 326,
+      "image_height": 276,
+      "tile_width": 512,
+      "tile_height": 512,
+      "tile_offsets": [
+        1100
+      ],
+      "tile_bytecounts": [
+        201389
+      ]
+    }
+  }
+}

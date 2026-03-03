@@ -1,0 +1,195 @@
+/* ── 리셋 & 베이스 ── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  background: #0f1117;
+  color: #e2e8f0;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ── 앱 네비게이션 ── */
+.app-nav {
+  background: #1a1d2e;
+  border-bottom: 1px solid #2d3748;
+  padding: 10px 20px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-shrink: 0;
+}
+.app-nav-title { font-size: 16px; color: #e2e8f0; }
+.app-nav-title strong { color: #63b3ed; }
+.badge {
+  background: #2b6cb0; color: #bee3f8;
+  font-size: 11px; padding: 2px 8px; border-radius: 12px; font-weight: 600;
+}
+.app-nav-tabs { margin-left: auto; display: flex; gap: 6px; }
+.nav-tab {
+  padding: 6px 14px; border-radius: 6px; border: 1px solid #2d3748;
+  background: #2d3748; color: #a0aec0;
+  font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.15s;
+}
+.nav-tab:hover  { border-color: #4a5568; color: #e2e8f0; }
+.nav-tab.active { background: #1a365d; border-color: #63b3ed; color: #bee3f8; }
+
+/* ── 서브 네비게이션 ── */
+.sub-nav {
+  background: #13161f;
+  border-bottom: 2px solid #2d3748;
+  padding: 0 20px;
+  display: flex;
+  gap: 0;
+  flex-shrink: 0;
+}
+.sub-tab {
+  padding: 8px 18px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: #718096;
+  font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.15s;
+  margin-bottom: -2px;
+}
+.sub-tab:hover  { color: #e2e8f0; }
+.sub-tab.active { color: #63b3ed; border-bottom-color: #63b3ed; }
+
+/* ── 페이지 레이아웃 ── */
+.page { height: 100%; display: flex; flex-direction: column; }
+
+/* ── 상태 바 ── */
+.status-bar {
+  padding: 7px 16px; background: #1a202c; border-bottom: 1px solid #2d3748;
+  font-size: 12px; color: #718096; flex-shrink: 0;
+}
+.status-bar.loading { color: #f6e05e; }
+.status-bar.done    { color: #68d391; }
+.status-bar.error   { color: #fc8181; }
+
+/* ── 메인 레이아웃 ── */
+.main { display: flex; flex: 1; overflow: hidden; }
+
+/* ── 사이드바 ── */
+.sidebar {
+  width: 300px; flex-shrink: 0;
+  background: #1a1d2e; border-right: 1px solid #2d3748;
+  display: flex; flex-direction: column; overflow-y: auto;
+}
+.panel { padding: 14px; border-bottom: 1px solid #2d3748; }
+.panel-title {
+  font-size: 11px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.08em; color: #718096; margin-bottom: 10px;
+}
+
+/* ── 티어 버튼 ── */
+.tier-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.tier-btn {
+  padding: 10px 6px; border-radius: 8px; border: 2px solid #2d3748;
+  background: #2d3748; color: #a0aec0; cursor: pointer; text-align: center; transition: all 0.15s;
+}
+.tier-btn:hover { border-color: #4a5568; }
+.tier-btn.active { border-color: #63b3ed; background: #1a365d; color: #bee3f8; }
+.tier-icon  { font-size: 20px; display: block; margin-bottom: 4px; }
+.tier-name  { font-size: 11px; font-weight: 700; display: block; }
+.tier-levels { font-size: 10px; color: #718096; display: block; margin-top: 2px; }
+.tier-btn.active .tier-levels { color: #90cdf4; }
+
+/* ── 로드 버튼 ── */
+.load-btn {
+  width: 100%; padding: 10px; margin-top: 8px; border-radius: 8px; border: none;
+  color: white; font-size: 13px; font-weight: 600; cursor: pointer; transition: background 0.15s;
+}
+.load-btn.scog { background: #2b6cb0; }
+.load-btn.scog:hover:not(:disabled) { background: #2c5282; }
+.load-btn.cog  { background: #276749; }
+.load-btn.cog:hover:not(:disabled)  { background: #22543d; }
+.load-btn:disabled { background: #2d3748; color: #4a5568; cursor: not-allowed; }
+
+/* ── 레벨 접근 상태 ── */
+.level-row {
+  display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+  border-radius: 6px; margin-bottom: 6px; background: #2d3748;
+}
+.level-badge {
+  font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 4px;
+  min-width: 28px; text-align: center;
+}
+.level-badge.accessible { background: #276749; color: #9ae6b4; }
+.level-badge.blocked    { background: #742a2a; color: #fc8181; }
+.level-info { font-size: 12px; flex: 1; }
+.level-res  { color: #a0aec0; font-size: 11px; }
+.level-status { font-size: 11px; font-weight: 600; }
+.level-status.ok      { color: #68d391; }
+.level-status.blocked { color: #fc8181; }
+.level-status.loading { color: #f6e05e; }
+
+/* ── 통계 ── */
+.stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.stat-box { background: #2d3748; border-radius: 6px; padding: 10px 8px; text-align: center; }
+.stat-num   { font-size: 18px; font-weight: 700; color: #bee3f8; }
+.stat-label { font-size: 10px; color: #718096; margin-top: 2px; }
+
+/* ── 요청 로그 ── */
+.req-log { flex: 1; overflow-y: auto; min-height: 0; }
+.req-item {
+  padding: 7px 10px; border-bottom: 1px solid #1a202c;
+  font-size: 11px; font-family: 'JetBrains Mono', 'Cascadia Code', monospace;
+}
+.req-item:last-child { border-bottom: none; }
+.req-label { color: #90cdf4; font-weight: 600; }
+.req-range { color: #718096; }
+.req-size  { color: #68d391; }
+.req-ms    { color: #f6e05e; }
+.req-empty { color: #4a5568; font-size: 12px; padding: 8px 10px; }
+
+/* ── 지도 영역 ── */
+.map-wrapper { flex: 1; position: relative; }
+.map-wrapper > div:first-child { width: 100%; height: 100%; }
+
+/* ── 지도 오버레이 범례 ── */
+.map-legend {
+  position: absolute; bottom: 14px; right: 14px;
+  background: rgba(26,29,46,0.92); backdrop-filter: blur(8px);
+  border: 1px solid #2d3748; border-radius: 8px; padding: 10px 14px;
+  font-size: 12px; z-index: 10; min-width: 160px;
+}
+.legend-title { font-size: 10px; font-weight: 700; color: #718096; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px; }
+.legend-row   { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.legend-dot   { width: 10px; height: 10px; border-radius: 50%; }
+.legend-dot.green  { background: #68d391; }
+.legend-dot.red    { background: #fc8181; }
+
+/* ── ZoomViewer 전용 ── */
+.info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 10px; }
+.info-box  { background: #2d3748; border-radius: 6px; padding: 8px; text-align: center; }
+.info-num  { font-size: 15px; font-weight: 700; color: #bee3f8; }
+.info-sub  { font-size: 10px; color: #718096; margin-top: 2px; }
+
+.level-indicator { display: flex; gap: 6px; }
+.level-pill {
+  flex: 1; text-align: center; padding: 6px 4px; border-radius: 6px;
+  font-size: 11px; font-weight: 700; background: #2d3748; color: #718096;
+  border: 2px solid transparent; transition: all 0.2s;
+}
+.level-pill.active { background: #1a365d; color: #bee3f8; border-color: #63b3ed; }
+.pill-res { font-size: 9px; color: #718096; display: block; margin-top: 2px; }
+.level-pill.active .pill-res { color: #90cdf4; }
+
+.switch-log { flex: 1; overflow-y: auto; min-height: 0; }
+.switch-item {
+  padding: 6px 10px; border-bottom: 1px solid #1a202c;
+  font-size: 11px; font-family: 'JetBrains Mono', monospace;
+}
+.switch-item:last-child { border-bottom: none; }
+.si-time  { color: #718096; font-size: 10px; }
+.si-level { color: #90cdf4; font-weight: 700; }
+.si-res   { color: #68d391; }
+
+/* ── ZoomViewer 범례 ── */
+.legend-mode  { font-size: 13px; font-weight: 600; color: #bee3f8; }
+.legend-level { font-size: 11px; color: #90cdf4; margin-top: 3px; }
+
+/* ── 스크롤바 ── */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #4a5568; border-radius: 2px; }

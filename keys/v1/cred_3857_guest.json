@@ -1,0 +1,16 @@
+{
+  "file_id": "kompsat_3857",
+  "scog_block_size": 360,
+  "levels": {
+    "2": "2b3a748cc716da067a0f71487b1e71b035c048fdfb844393bfd0cd436e50bba8"
+  },
+  "level_meta": {
+    "2": {
+      "tile_count": 1,
+      "image_width": 326,
+      "image_height": 276,
+      "tile_width": 512,
+      "tile_height": 512
+    }
+  }
+}

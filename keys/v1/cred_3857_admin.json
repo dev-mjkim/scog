@@ -1,0 +1,32 @@
+{
+  "file_id": "kompsat_3857",
+  "scog_block_size": 360,
+  "levels": {
+    "0": "7172c2b94b2b2c7927ddcb9a9d4a90b4de7b75a9370d2fc5c4a94a2fb4def01d",
+    "1": "e25da4b25dfe0cee0f6e465529101a0f536d1379aaeadea60df30eefdfbe3a30",
+    "2": "2b3a748cc716da067a0f71487b1e71b035c048fdfb844393bfd0cd436e50bba8"
+  },
+  "level_meta": {
+    "0": {
+      "tile_count": 9,
+      "image_width": 1305,
+      "image_height": 1107,
+      "tile_width": 512,
+      "tile_height": 512
+    },
+    "1": {
+      "tile_count": 4,
+      "image_width": 652,
+      "image_height": 553,
+      "tile_width": 512,
+      "tile_height": 512
+    },
+    "2": {
+      "tile_count": 1,
+      "image_width": 326,
+      "image_height": 276,
+      "tile_width": 512,
+      "tile_height": 512
+    }
+  }
+}

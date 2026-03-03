@@ -1,0 +1,39 @@
+services:
+  fileserver:
+    image: nginx:alpine
+    ports:
+      - "8777:80"
+    volumes:
+      - ../data:/usr/share/nginx/html:ro
+    configs:
+      - source: nginx_conf
+        target: /etc/nginx/conf.d/default.conf
+
+configs:
+  nginx_conf:
+    content: |
+      server {
+        listen 80;
+        server_name localhost;
+
+        location / {
+          root /usr/share/nginx/html;
+
+          # CORS preflight (OPTIONS) 처리
+          if ($$request_method = 'OPTIONS') {
+            add_header Access-Control-Allow-Origin * always;
+            add_header Access-Control-Allow-Methods 'GET, HEAD, OPTIONS' always;
+            add_header Access-Control-Allow-Headers 'Range, Content-Type' always;
+            add_header Access-Control-Expose-Headers 'Content-Range, Content-Length, Accept-Ranges' always;
+            add_header Access-Control-Max-Age 86400 always;
+            add_header Content-Length 0;
+            return 204;
+          }
+
+          add_header Accept-Ranges bytes always;
+          add_header Access-Control-Allow-Origin * always;
+          add_header Access-Control-Allow-Methods 'GET, HEAD, OPTIONS' always;
+          add_header Access-Control-Allow-Headers 'Range' always;
+          add_header Access-Control-Expose-Headers 'Content-Range, Content-Length, Accept-Ranges' always;
+        }
+      }
