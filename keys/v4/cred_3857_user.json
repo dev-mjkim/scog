@@ -1,9 +1,4 @@
 {
   "file_id": "kompsat_3857",
-  "format": "v4",
-  "encrypt_size": 1024,
-  "levels": {
-    "1": "0a0f0d63dcf3142dbf286cba662cf8ce50c92d637770c3131a41792401315bd2",
-    "2": "6e4951a565fb60736a1e1185aa35cf1ddceb5a48ebfb9068b2ed616a657beab6"
-  }
+  "key": "eac783d5af7e3a64ccfa7aad98519f18cc1a20ea3d94c0857c3ac6e793dad49a"
 }

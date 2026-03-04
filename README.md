@@ -21,7 +21,7 @@ Cloud Optimized GeoTIFF (COG)는 HTTP Range Request로 필요한 타일만 가�
 | ----- | -------------- | ------------------------ |
 | Admin | L0 + L1 + L2   | 1305×1107 (전해상도)     |
 | User  | L1 + L2        | 652×553 (중해상도)       |
-| Guest | L2만           | 326×276 (저해상도, 공개) |
+| Guest | L2만 (v4: 접근 불가) | 326×276 (저해상도) |
 
 ---
 
@@ -109,25 +109,33 @@ v4:    [IV 12B][AES-GCM(앞 1KB) + tag 16B][나머지 평문...]
 - TileByteCounts = 원본 + 28 (타일마다)
 - SCOG 블록 없음 — IFD 구조 그대로 유지 (유효한 TIFF)
 
-#### v4 자격증명
+#### v4 자격증명 (HKDF 단일 키)
 
-```json
-{
-  "file_id": "kompsat_3857",
-  "format": "v4",
-  "encrypt_size": 1024,
-  "levels": {
-    "0": "hex_cek_level0...",
-    "1": "hex_cek_level1...",
-    "2": "hex_cek_level2..."
-  }
-}
+서버는 HKDF-SHA256 키 체인으로 레벨별 CEK를 유도한다:
+
+```
+L0_cek = root_key (random 32B)
+L1_cek = HKDF-SHA256(ikm=L0_cek, salt=b"", info=b"scog-level-derive")
+L2_cek = HKDF-SHA256(ikm=L1_cek, salt=b"", info=b"scog-level-derive")
 ```
 
-- 키만 포함 — `level_meta` 없음 (클라이언트가 TIFF IFD에서 직접 파싱)
-- 모든 레벨이 암호화됨 (공개 레벨 없음)
-- `format: "v4"` 필드로 버전 감지
-- Guest 자격증명은 `levels: {}` → 모든 레벨 접근 거부
+자격증명에는 **키 하나만** 포함:
+
+```json
+// Admin: L0 키 → L1, L2 유도 가능 → 전 레벨
+{ "file_id": "kompsat_3857", "key": "hex_L0_cek" }
+
+// User: L1 키 → L2 유도 가능 → L1+L2만
+{ "file_id": "kompsat_3857", "key": "hex_L1_cek" }
+
+// Guest: 키 없음 → 접근 불가
+{ "file_id": "kompsat_3857" }
+```
+
+- HKDF 단방향 → L1 키로 L0 키 역산 불가
+- `key` 필드 유무로 v4 감지 (`format` 필드 없음)
+- 클라이언트는 trial decryption으로 키가 어떤 레벨부터인지 자동 판단
+- `level_meta`, `encrypt_size` 없음 — 클라이언트가 TIFF IFD에서 직접 파싱, encrypt_size=1024 고정
 
 #### v4 클라이언트 플로우
 
@@ -135,10 +143,15 @@ v4:    [IV 12B][AES-GCM(앞 1KB) + tag 16B][나머지 평문...]
 1. fetch(0, 16384)                    ← 16KB 1회 요청
    └── parseTiffIFDs() → IFD 0, 1, 2 파싱 (TileOffsets 유효)
 
-2. fetchTile(level, col, row)
+2. resolveV4Keys()                    ← Trial Decryption
+   ├── HKDF 키 체인 생성: [key, HKDF(key), HKDF(HKDF(key)), ...]
+   ├── 각 레벨 타일 0 fetch → 후보 키 순서대로 복호화 시도
+   └── 성공 시 매핑 캐시 (이후 즉시 사용)
+
+3. fetchTile(level, col, row)
    └── fetch(offset, bytecount)       ← 암호화된 타일 수신
        ├── IV(12B) 분리
-       ├── 앞 1KB + tag(16B) → AES-GCM 복호화 (WebCrypto)
+       ├── 앞 1KB + tag(16B) → AES-GCM 복호화 (매핑된 CEK)
        ├── 나머지 평문과 합침
        └── DEFLATE 해제 → 렌더링
 ```
@@ -171,7 +184,7 @@ v4:    [IV 12B][AES-GCM(앞 1KB) + tag 16B][나머지 평문...]
 | 자격증명 크기   | 큼 (level_meta 포함) | 큼                 | **최소** (키만)     | **최소** (키만)         |
 | brute-force 내성 | 취약                | 취약               | 취약                | **강함**                |
 | 타일 변조 감지  | X                    | X                  | X                   | **O (GCM tag)**         |
-| 버전 감지       | `scog_block_size`    | `public_level`     | `scog_block_offset` | `format: "v4"`          |
+| 버전 감지       | `scog_block_size`    | `public_level`     | `scog_block_offset` | `key` 필드 유무         |
 
 ---
 
@@ -277,7 +290,7 @@ scog/
 │           └── ZoomViewer.jsx        줌 연동 뷰어 (v4 복호화 시간 표시)
 │
 ├── tests/
-│   └── test_scog.py                 19개 테스트
+│   └── test_scog.py                 20개 테스트
 │
 └── docker/
     └── docker-compose.yml           nginx (포트 8777, Range Request + CORS)
@@ -335,16 +348,16 @@ python3 src/cred_issuer.py keys/v3/kompsat_3857_ceks.json \
 python3 src/cred_issuer.py keys/v3/kompsat_3857_ceks.json \
     --levels --out keys/v3/cred_3857_guest.json
 
-# v4 예시
-# Admin: 전 레벨 CEK
+# v4 예시 (HKDF 단일 키)
+# Admin: L0 키 발급 → L1, L2 유도 가능 → 전 레벨
 python3 src/cred_issuer.py keys/v4/kompsat_3857_ceks.json \
     --levels 0 1 2 --out keys/v4/cred_3857_admin.json
 
-# User: L1+L2 CEK
+# User: L1 키 발급 → L2 유도 가능 → L1+L2만
 python3 src/cred_issuer.py keys/v4/kompsat_3857_ceks.json \
     --levels 1 2 --out keys/v4/cred_3857_user.json
 
-# Guest: CEK 없음 (모든 레벨 접근 거부)
+# Guest: 키 없음 → 접근 불가
 python3 src/cred_issuer.py keys/v4/kompsat_3857_ceks.json \
     --levels --out keys/v4/cred_3857_guest.json
 ```
@@ -385,7 +398,7 @@ npm run dev
 
 ```bash
 python3 tests/test_scog.py
-# 결과: 19 passed, 0 failed
+# 결과: 20 passed, 0 failed
 ```
 
 ---
@@ -407,12 +420,13 @@ python3 tests/test_scog.py
 | 11  | v3 로컬 읽기       | 암호화 + 공개 레벨 타일 읽기                            |
 | 12  | v3 권한 거부       | Guest로 암호화 레벨 → PermissionError, 공개 레벨 → 성공 |
 | 13  | v3 HTTP 읽기       | nginx 경유 v3 타일 읽기                                 |
-| 14  | v4 변환            | COG → v4 변환 + 타일 데이터 암호화 확인                 |
-| 15  | v4 로컬 읽기       | 유효 자격증명으로 타일 복호화 + 원본 바이트 일치         |
-| 16  | v4 권한 거부       | CEK 없는 레벨 접근 → PermissionError                    |
-| 17  | v4 변조 감지       | 암호화된 타일 1비트 변조 → InvalidTag                   |
-| 18  | v4 잘못된 CEK      | 다른 CEK 사용 → InvalidTag                              |
-| 19  | v4 HTTP 읽기       | nginx 경유 v4 타일 읽기                                 |
+| 14  | v4 HKDF 체인       | HKDF 키 체인 생성 검증 (root → L0 → L1 → L2)           |
+| 15  | v4 Admin 단일 키   | Admin 키(L0)로 전 레벨 복호화 + 원본 바이트 일치        |
+| 16  | v4 User 단일 키    | User 키(L1)로 L1+L2 성공, L0 → PermissionError         |
+| 17  | v4 Guest 접근 불가 | Guest (키 없음) → 전 레벨 PermissionError               |
+| 18  | v4 변조 감지       | 암호화된 타일 1비트 변조 → InvalidTag                   |
+| 19  | v4 HTTP 읽기       | nginx 경유 Admin 단일 키 타일 읽기                      |
+| 20  | v4 HKDF known vector | Python HKDF 결정성 + 크로스 플랫폼 검증용 벡터        |
 
 ---
 

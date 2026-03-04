@@ -32,6 +32,7 @@ from scog_structs import (
     find_min_tile_offset, pre_calculate_scog_block_size,
     write_ifd_tag_values,
     encrypt_tile_partial,
+    derive_level_keys,
     TAG_TILE_OFFSETS, TAG_TILE_BYTECOUNTS,
     TAG_IMAGEWIDTH, TAG_IMAGELENGTH, TAG_TILEWIDTH, TAG_TILELENGTH,
     get_ifd_scalar,
@@ -299,9 +300,15 @@ def _cog_to_scog_v4(input_path, output_path, keys_dir,
     header_end = find_min_tile_offset(tiff)
     print(f"      헤더 영역: 0 ~ {header_end:,} bytes")
 
+    # HKDF 키 체인 생성: root_key → L0, L1, L2, ...
+    num_levels = len([ifd for ifd in tiff.ifds if ifd.entries.get(TAG_TILE_OFFSETS)])
+    root_key = os.urandom(32)
+    level_ceks = derive_level_keys(root_key, num_levels)
+
     # 모든 타일 수집 (IFD별, offset 순서대로)
     # 각 타일: (ifd_idx, tile_idx_in_ifd, original_offset, original_size)
     all_tiles = []
+    level_idx = 0
     for ifd_idx, ifd in enumerate(tiff.ifds):
         off_entry = ifd.entries.get(TAG_TILE_OFFSETS)
         bc_entry  = ifd.entries.get(TAG_TILE_BYTECOUNTS)
@@ -318,8 +325,9 @@ def _cog_to_scog_v4(input_path, output_path, keys_dir,
             'tile_height':  get_ifd_scalar(ifd, TAG_TILELENGTH),
         }
 
-        cek = os.urandom(32)
+        cek = level_ceks[level_idx]
         cek_store[str(ifd_idx)] = cek.hex()
+        level_idx += 1
 
         for tile_idx, (off, bc) in enumerate(zip(offsets, bytecounts)):
             all_tiles.append((ifd_idx, tile_idx, off, bc))
@@ -381,6 +389,7 @@ def _cog_to_scog_v4(input_path, output_path, keys_dir,
         'format':       'v4',
         'encrypt_size': encrypt_size,
         'scog_file':    str(output_path),
+        'root_key':     root_key.hex(),
         'levels':       cek_store,
         'level_meta':   level_meta,
     }

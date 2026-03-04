@@ -35,7 +35,7 @@ const TIER_META_V3 = TIER_META_V2;
 const TIER_META_V4 = {
   admin: { icon: '👑', name: 'Admin', levels: [0, 1, 2] },
   user:  { icon: '👤', name: 'User',  levels: [1, 2] },
-  guest: { icon: '🌐', name: 'Guest', levels: [2] },
+  guest: { icon: '🌐', name: 'Guest', levels: [] },
 };
 
 // ─── ZoomViewer 컴포넌트 ──────────────────────────────────────────────────────
@@ -311,7 +311,7 @@ export default function ZoomViewer({ version = 'v1' }) {
                 >
                   <span className="tier-icon">{m.icon}</span>
                   <span className="tier-name">{m.name}</span>
-                  <span className="tier-levels">L{m.levels.join('·')}</span>
+                  <span className="tier-levels">{m.levels.length ? `L${m.levels.join('·')}` : '접근 불가'}</span>
                 </button>
               ))}
             </div>

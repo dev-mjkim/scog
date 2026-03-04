@@ -29,11 +29,13 @@ from scog_structs import (
     parse_scog_block, decrypt_level, parse_scog_footer,
     decrypt_tile_partial,
     parse_tiff, parse_ifd,
+    derive_next_key,
     TAG_TILE_OFFSETS, TAG_TILE_BYTECOUNTS,
     TAG_IMAGEWIDTH, TAG_IMAGELENGTH, TAG_TILEWIDTH, TAG_TILELENGTH,
     get_ifd_scalar,
 )
 from cred_issuer import load_credential, get_cek
+from cryptography.exceptions import InvalidTag
 
 
 # ─── 파일 어댑터 (로컬 / HTTP) ──────────────────────────────────────────────
@@ -98,9 +100,15 @@ class ScogReader:
         self._v3_ifds = None         # v3: 원본 IFD 리스트 (parse_ifd 결과)
         self._v3_header = None       # v3: 16KB raw 데이터
         self._v4_tiff = None         # v4: 파싱된 TIFF 구조
+        self._v4_level_ceks = None   # v4: {level_id: bytes} — trial decryption 결과
 
     def _is_v4(self) -> bool:
-        return self.cred.get('format') == 'v4'
+        # v4 감지: 'key' 필드 있음, 또는 v1/v2/v3 마커 모두 없음
+        if 'key' in self.cred:
+            return True
+        # guest: key/levels/scog_block_size/public_level/scog_block_offset 모두 없음
+        v_markers = ('key', 'levels', 'scog_block_size', 'public_level', 'scog_block_offset')
+        return not any(k in self.cred for k in v_markers)
 
     def _is_v3(self) -> bool:
         return 'scog_block_offset' in self.cred and not self._is_v4()
@@ -115,6 +123,57 @@ class ScogReader:
         raw = self.adapter.read_range(0, 16384)
         tiff = parse_tiff(bytes(raw))
         self._v4_tiff = tiff
+
+    def _resolve_v4_keys(self):
+        """v4 Trial Decryption: HKDF 키 체인 → 타일 0 시도 → 레벨 매핑 캐시.
+
+        클라이언트는 key가 어떤 레벨의 CEK인지 모름.
+        키 체인 [key, HKDF(key), HKDF(HKDF(key)), ...] 생성 후
+        각 레벨의 타일 0을 순서대로 시도하여 매핑.
+        """
+        if self._v4_level_ceks is not None:
+            return
+        self._load_v4()
+
+        # guest: 키 없음
+        if 'key' not in self.cred:
+            self._v4_level_ceks = {}
+            return
+
+        root = bytes.fromhex(self.cred['key'])
+        num_levels = len(self._v4_tiff.ifds)
+        file_id = self.cred['file_id']
+
+        # 키 체인 생성
+        chain = [root]
+        for _ in range(num_levels - 1):
+            chain.append(derive_next_key(chain[-1]))
+
+        self._v4_level_ceks = {}
+
+        for level_id in range(num_levels):
+            ifd = self._v4_tiff.ifds[level_id]
+            off_entry = ifd.entries.get(TAG_TILE_OFFSETS)
+            bc_entry = ifd.entries.get(TAG_TILE_BYTECOUNTS)
+            if off_entry is None:
+                continue
+
+            # 타일 0 fetch
+            tile_off = int(off_entry.values[0])
+            tile_bc = int(bc_entry.values[0]) if bc_entry else 0
+            if tile_off == 0 or tile_bc == 0:
+                continue
+            enc_tile = self.adapter.read_range(tile_off, tile_bc)
+
+            # 후보 키 순서대로 시도
+            for candidate in chain:
+                try:
+                    decrypt_tile_partial(enc_tile, candidate, file_id,
+                                         level_id, 0, 1024)
+                    self._v4_level_ceks[level_id] = candidate
+                    break
+                except InvalidTag:
+                    continue
 
     def _load_scog_block(self):
         if self._scog is not None:
@@ -182,13 +241,15 @@ class ScogReader:
         if level_id in self._cache:
             return self._cache[level_id]
 
-        # v4: IFD에서 TileOffsets/TileByteCounts 직접 사용 (SCOG 블록 없음)
+        # v4: HKDF trial decryption → 레벨 매핑
         if self._is_v4():
-            self._load_v4()
-            if level_id >= len(self._v4_tiff.ifds):
-                raise IndexError(f"IFD {level_id} 없음 (총 {len(self._v4_tiff.ifds)}개)")
-            # CEK 확인 (없으면 PermissionError)
-            _ = get_cek(self.cred, level_id)
+            self._resolve_v4_keys()
+            if level_id not in self._v4_level_ceks:
+                available = sorted(self._v4_level_ceks.keys())
+                raise PermissionError(
+                    f"레벨 {level_id}에 대한 접근 권한 없음. "
+                    f"보유 레벨: {available}"
+                )
             ifd = self._v4_tiff.ifds[level_id]
             off_entry = ifd.entries.get(TAG_TILE_OFFSETS)
             bc_entry  = ifd.entries.get(TAG_TILE_BYTECOUNTS)
@@ -309,12 +370,11 @@ class ScogReader:
 
         raw_tile = self.adapter.read_range(file_offset, bytecount)
 
-        # v4: 타일 복호화
+        # v4: 타일 복호화 (trial decryption으로 매핑된 CEK 사용)
         if self._is_v4():
-            cek = get_cek(self.cred, level_id)
-            encrypt_size = self.cred.get('encrypt_size', 1024)
+            cek = self._v4_level_ceks[level_id]
             raw_tile = decrypt_tile_partial(raw_tile, cek, self.cred['file_id'],
-                                            level_id, idx, encrypt_size)
+                                            level_id, idx, 1024)
 
         return raw_tile
 
@@ -336,6 +396,9 @@ class ScogReader:
         return self.cred.get('level_meta', {}).get(str(level_id), {})
 
     def available_levels(self) -> list:
+        if self._is_v4():
+            self._resolve_v4_keys()
+            return sorted(self._v4_level_ceks.keys())
         levels = set(int(k) for k in self.cred['levels'].keys())
         if self._is_v3():
             # v3: IFD에서 공개 레벨 발견 (TileOffsets ≠ 0)

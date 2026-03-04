@@ -203,6 +203,22 @@ function parseTiffIFDs(buf, firstIfdOffset) {
 }
 
 
+// ─── HKDF 키 유도 (v4) ──────────────────────────────────────────────────────
+
+const HKDF_INFO = new TextEncoder().encode('scog-level-derive');
+
+async function deriveNextKey(keyBytes) {
+  const base = await crypto.subtle.importKey(
+    'raw', keyBytes, 'HKDF', false, ['deriveBits']
+  );
+  return new Uint8Array(await crypto.subtle.deriveBits(
+    { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: HKDF_INFO },
+    base, 256
+  ));
+}
+
+export { deriveNextKey };
+
 // ─── SCOG 클라이언트 ─────────────────────────────────────────────────────────
 
 export class SCOGClient {
@@ -220,10 +236,14 @@ export class SCOGClient {
     this.v4DecryptLog    = [];    // v4: 타일별 복호화 로그 누적
     this._v4Keys         = {};   // v4: levelId → CryptoKey 캐시
     this._v4FileIdBytes  = null; // v4: file_id UTF-8 캐시
+    this._v4LevelCeks    = null; // v4: Map(levelId → Uint8Array) — trial decryption 결과
   }
 
   _isV4() {
-    return this.cred.format === 'v4';
+    // v4 감지: 'key' 필드 있음, 또는 v1/v2/v3 마커 모두 없음
+    if ('key' in this.cred) return true;
+    const markers = ['key', 'levels', 'scog_block_size', 'public_level', 'scog_block_offset'];
+    return !markers.some(k => k in this.cred);
   }
 
   _isV3() {
@@ -238,6 +258,7 @@ export class SCOGClient {
     if (this._scogBlock) return;
     if (this._isV4()) {
       await this._loadV4();
+      await this._resolveV4Keys();
       return;
     }
     if (this._isV3()) {
@@ -261,6 +282,67 @@ export class SCOGClient {
     const firstIfd = le ? view.getUint32(4, true) : view.getUint32(4, false);
     this._v4Ifds = parseTiffIFDs(raw, firstIfd);
     this._scogBlock = { entries: {} };  // 빈 블록 (v4는 SCOG 블록 없음)
+  }
+
+  async _resolveV4Keys() {
+    // Trial decryption: HKDF 키 체인 → 타일 0 시도 → 레벨 매핑
+    if (this._v4LevelCeks) return;
+    this._v4LevelCeks = new Map();
+
+    if (!('key' in this.cred)) return; // guest
+
+    const root = hexToBytes(this.cred.key);
+    const numLevels = this._v4Ifds?.length || 0;
+    const fileId = this.cred.file_id;
+    const fileIdBytes = new TextEncoder().encode(fileId);
+
+    // 키 체인 생성
+    const chain = [root];
+    for (let i = 1; i < numLevels; i++) {
+      chain.push(await deriveNextKey(chain[i - 1]));
+    }
+
+    for (let levelId = 0; levelId < numLevels; levelId++) {
+      const ifd = this._v4Ifds[levelId];
+      if (!ifd || !ifd[324] || !ifd[325]) continue;
+
+      const tileOff = ifd[324][0];
+      const tileBc  = ifd[325][0];
+      if (!tileOff || !tileBc) continue;
+
+      // 타일 0 fetch
+      const encTile = await this._fetch(tileOff, tileBc, `v4 trial L${levelId}`);
+
+      // 후보 키 순서대로 시도
+      for (const candidate of chain) {
+        try {
+          await this._tryDecryptTile(encTile, candidate, fileIdBytes, levelId, 0);
+          this._v4LevelCeks.set(levelId, candidate);
+          break;
+        } catch {
+          // InvalidTag → 다음 후보
+        }
+      }
+    }
+  }
+
+  async _tryDecryptTile(encTile, cekBytes, fileIdBytes, levelId, tileIndex) {
+    const iv     = encTile.slice(0, 12);
+    const actual = Math.min(1024, encTile.length - 28);
+    const ct     = encTile.slice(12, 12 + actual + 16);
+
+    const aadBuf = new Uint8Array(fileIdBytes.length + 6);
+    aadBuf.set(fileIdBytes, 0);
+    new DataView(aadBuf.buffer).setUint16(fileIdBytes.length, levelId, false);
+    new DataView(aadBuf.buffer).setUint32(fileIdBytes.length + 2, tileIndex, false);
+
+    const key = await crypto.subtle.importKey(
+      'raw', cekBytes, { name: 'AES-GCM' }, false, ['decrypt']
+    );
+    await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv, additionalData: aadBuf, tagLength: 128 },
+      key, ct
+    );
   }
 
   async _loadScogBlockV3() {
@@ -304,11 +386,12 @@ export class SCOGClient {
   async decryptLevel(levelId) {
     if (this._offsets[levelId]) return this._offsets[levelId];
 
-    // v4: IFD에서 TileOffsets/TileByteCounts 직접 사용
+    // v4: trial decryption으로 매핑된 레벨만 접근 가능
     if (this._isV4()) {
       await this.loadScogBlock();
-      if (!this.cred.levels[String(levelId)]) {
-        throw new SCOGPermissionError(levelId, Object.keys(this.cred.levels).map(Number));
+      if (!this._v4LevelCeks?.has(levelId)) {
+        const available = this._v4LevelCeks ? [...this._v4LevelCeks.keys()] : [];
+        throw new SCOGPermissionError(levelId, available);
       }
       const ifd = this._v4Ifds?.[levelId];
       if (!ifd) throw new Error(`IFD ${levelId} 없음`);
@@ -418,7 +501,8 @@ export class SCOGClient {
 
   async _ensureV4Key(levelId) {
     if (!this._v4Keys[levelId]) {
-      const cek = hexToBytes(this.cred.levels[String(levelId)]);
+      const cek = this._v4LevelCeks.get(levelId);
+      if (!cek) throw new SCOGPermissionError(levelId, [...this._v4LevelCeks.keys()]);
       this._v4Keys[levelId] = await crypto.subtle.importKey(
         'raw', cek, { name: 'AES-GCM' }, false, ['decrypt']
       );
@@ -434,7 +518,7 @@ export class SCOGClient {
     const key         = this._v4Keys[levelId];
     const fileIdBytes = this._v4FileIdBytes;
 
-    const encryptSize = this.cred.encrypt_size || 1024;
+    const encryptSize = 1024;
     const iv     = encTile.slice(0, 12);
     const actual = Math.min(encryptSize, encTile.length - 28);
     const ct     = encTile.slice(12, 12 + actual + 16);
@@ -491,11 +575,11 @@ export class SCOGClient {
   }
 
   availableLevels() {
-    const levels = new Set(Object.keys(this.cred.levels).map(Number));
     if (this._isV4()) {
-      // v4: 자격증명의 levels만 (모두 암호화)
-      return [...levels].sort((a, b) => a - b);
+      // v4: trial decryption으로 매핑된 레벨만
+      return this._v4LevelCeks ? [...this._v4LevelCeks.keys()].sort((a, b) => a - b) : [];
     }
+    const levels = new Set(Object.keys(this.cred.levels).map(Number));
     if (this._isV3()) {
       // v3: IFD에서 공개 레벨 발견 (TileOffsets ≠ 0)
       if (this._v3Ifds) {

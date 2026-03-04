@@ -71,13 +71,19 @@ def issue_credential(cek_store_path: str, levels: list,
                         if lvl in level_meta_store}
 
     if is_v4:
-        # v4: 자격증명에 level_meta 없음 — 클라이언트가 TIFF IFD에서 직접 파싱
-        cred = {
-            'file_id':      store['file_id'],
-            'format':       'v4',
-            'encrypt_size': store.get('encrypt_size', 1024),
-            'levels':       {lvl: store['levels'][lvl] for lvl in sorted(requested)},
-        }
+        # v4 단일 키 자격증명: HKDF 키 체인으로 하위 레벨 유도
+        # requested에서 가장 높은 레벨(=가장 작은 번호)의 CEK를 key로 발급
+        if requested:
+            top_level = min(int(l) for l in requested)
+            cred = {
+                'file_id': store['file_id'],
+                'key':     store['levels'][str(top_level)],
+            }
+        else:
+            # guest: 키 없음 → 접근 불가
+            cred = {
+                'file_id': store['file_id'],
+            }
         fmt_label = 'v4'
     elif is_v3:
         # v3: 자격증명에 public_level/level_meta 없음 — 클라이언트가 TIFF IFD에서 발견
@@ -123,7 +129,13 @@ def issue_credential(cek_store_path: str, levels: list,
             print(f"  공개 레벨: {cred['public_level']}+")
         if is_v3:
             print(f"  first_ifd_offset: {cred['first_ifd_offset']}")
-        print(f"  암호화 접근 레벨: {sorted(cred['levels'].keys()) or '없음 (공개 접근만)'}")
+        if is_v4:
+            if 'key' in cred:
+                print(f"  key: {cred['key'][:16]}... (단일 키)")
+            else:
+                print(f"  guest (키 없음 → 접근 불가)")
+        else:
+            print(f"  암호화 접근 레벨: {sorted(cred['levels'].keys()) or '없음 (공개 접근만)'}")
 
     return cred
 

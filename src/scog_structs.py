@@ -12,6 +12,8 @@ import struct
 from dataclasses import dataclass, field
 from typing import Optional
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives import hashes
 
 # ─── 상수 ────────────────────────────────────────────────────────────────────
 
@@ -567,3 +569,28 @@ def redirect_tiff_first_ifd(data: bytearray, tiff: TiffInfo, new_offset: int) ->
         struct.pack_into(tiff.endian + 'Q', data, 8, new_offset)
     else:
         struct.pack_into(tiff.endian + 'I', data, 4, new_offset)
+
+
+# ─── HKDF 키 유도 (v4) ──────────────────────────────────────────────────────
+
+HKDF_INFO = b"scog-level-derive"
+
+
+def derive_next_key(key: bytes) -> bytes:
+    """HKDF-SHA256으로 다음 레벨 CEK 유도. 단방향 — 역산 불가."""
+    return HKDF(
+        algorithm=hashes.SHA256(), length=32, salt=b"", info=HKDF_INFO
+    ).derive(key)
+
+
+def derive_level_keys(root_key: bytes, num_levels: int) -> list[bytes]:
+    """루트 키에서 num_levels개의 레벨 CEK 체인 생성.
+
+    L0_cek = root_key
+    L1_cek = HKDF(L0_cek)
+    L2_cek = HKDF(L1_cek)
+    """
+    keys = [root_key]
+    for _ in range(num_levels - 1):
+        keys.append(derive_next_key(keys[-1]))
+    return keys

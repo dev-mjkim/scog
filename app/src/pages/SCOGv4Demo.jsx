@@ -15,7 +15,7 @@ import { CREDENTIALS_V4, SCOG_V4_URL, COG_URL, EXTENT } from '../credentials.js'
 const TIER_META = {
   admin: { icon: '👑', name: 'Admin', label: 'L0+L1+L2 복호화 (전해상도)',           encLevels: [0, 1, 2] },
   user:  { icon: '👤', name: 'User',  label: 'L1+L2 복호화 (저해상도)',               encLevels: [1, 2] },
-  guest: { icon: '🌐', name: 'Guest', label: 'L2만 복호화 (최저해상도)',              encLevels: [2] },
+  guest: { icon: '🌐', name: 'Guest', label: '접근 불가 (키 없음)',                   encLevels: [] },
 };
 
 // ─── SCOGv4Demo 컴포넌트 ─────────────────────────────────────────────────────

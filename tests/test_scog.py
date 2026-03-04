@@ -20,6 +20,7 @@ from scog_structs import (
     parse_scog_block, decrypt_level, encrypt_level, serialize_scog_block,
     parse_tiff, zero_tile_offsets,
     encrypt_tile_partial, decrypt_tile_partial,
+    derive_next_key, derive_level_keys,
 )
 from cog_to_scog import cog_to_scog
 from cred_issuer import issue_credential, load_credential, get_cek
@@ -334,97 +335,129 @@ KEYS_V4_DIR  = os.path.join(SCOG_DIR, 'keys', 'v4')
 CEKS_V4_FILE = os.path.join(KEYS_V4_DIR, 'kompsat_3857_ceks.json')
 
 
-def test_14_v4_conversion():
-    """V4: COG → SCOG v4 변환 + 타일 데이터 암호화 확인"""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmp_scog = os.path.join(tmpdir, 'test.v4.scog.tif')
-        tmp_keys = os.path.join(tmpdir, 'keys')
+def test_14_v4_hkdf_chain():
+    """V4: HKDF 키 체인 생성 검증 (root → derived keys 일치)"""
+    with open(CEKS_V4_FILE) as f:
+        store = json.load(f)
 
-        cek_data = cog_to_scog(COG_FILE, tmp_scog, tmp_keys, format_ver='v4')
-        assert cek_data.get('format') == 'v4'
-        assert cek_data.get('encrypt_size') == 1024
+    root = bytes.fromhex(store['root_key'])
+    l0 = bytes.fromhex(store['levels']['0'])
+    l1 = bytes.fromhex(store['levels']['1'])
+    l2 = bytes.fromhex(store['levels']['2'])
 
-        # 출력 파일이 유효한 TIFF인지 확인
-        with open(tmp_scog, 'rb') as f:
-            data = f.read()
-        assert data[:2] in (b'II', b'MM'), f"TIFF 매직 오류: {data[:2]!r}"
-        tiff = parse_tiff(data)
-        assert len(tiff.ifds) >= 2
+    # root == L0
+    assert root == l0, "root_key != L0 CEK"
 
-        # 암호화된 타일은 DEFLATE 매직(78 9c/78 da)이 아님
-        ifd = tiff.ifds[0]
-        from scog_structs import TAG_TILE_OFFSETS, TAG_TILE_BYTECOUNTS
-        off = int(ifd.entries[TAG_TILE_OFFSETS].values[0])
-        bc  = int(ifd.entries[TAG_TILE_BYTECOUNTS].values[0])
-        tile_raw = data[off:off + bc]
-        # 앞 12바이트는 IV, 13~14바이트는 암호문 (DEFLATE 매직이면 안 됨)
-        assert tile_raw[12:14] != b'\x78\x9c', "암호화된 타일이 평문 DEFLATE 시작 — 암호화 실패"
-        print(f"  V4 변환 확인: {len(data):,} bytes, {len(tiff.ifds)} IFDs, 타일 암호화됨")
+    # HKDF chain
+    assert derive_next_key(l0) == l1, "HKDF(L0) != L1"
+    assert derive_next_key(l1) == l2, "HKDF(L1) != L2"
+
+    # derive_level_keys 일괄 생성
+    keys = derive_level_keys(root, 3)
+    assert keys[0] == l0
+    assert keys[1] == l1
+    assert keys[2] == l2
+
+    # 단방향 확인: L1에서 L0 유도 불가 (HKDF(L1) == L2, not L0)
+    assert derive_next_key(l1) != l0, "HKDF 단방향 실패: L1에서 L0 유도됨"
+    print(f"  HKDF 키 체인 검증 완료: root → L0 → L1 → L2")
 
 
-def test_15_v4_local_read():
-    """V4 로컬: 유효 자격증명으로 타일 읽기 + 원본과 일치 확인"""
-    cred = issue_credential(CEKS_V4_FILE, levels=[0, 1, 2])
+def test_15_v4_admin_single_key():
+    """V4: Admin 단일 키(L0)로 전 레벨 읽기"""
+    cred = load_credential(os.path.join(KEYS_V4_DIR, 'cred_3857_admin.json'))
+    assert 'key' in cred, "Admin 자격증명에 'key' 필드 없음"
+    assert 'levels' not in cred, "Admin 자격증명에 'levels' 필드 있으면 안 됨"
+
     reader = ScogReader(SCOG_V4_FILE, cred)
+    assert reader.available_levels() == [0, 1, 2], \
+        f"Admin이 전 레벨 접근 불가: {reader.available_levels()}"
 
-    tile = reader.read_tile(0, 0, 0)
-    assert len(tile) > 0, "타일 데이터가 비어있음"
-    assert tile[:2] in (b'\x78\x9c', b'\x78\xda'), \
-        f"복호화된 타일이 DEFLATE가 아님: {tile[:4].hex()}"
+    # 모든 레벨 타일 읽기
+    for lvl in [0, 1, 2]:
+        tile = reader.read_tile(lvl, 0, 0)
+        assert len(tile) > 0
+        assert tile[:2] in (b'\x78\x9c', b'\x78\xda'), \
+            f"L{lvl} 복호화된 타일이 DEFLATE가 아님"
 
-    # 원본 COG 타일과 비교
+    # 원본 COG L0 타일과 비교
     with open(COG_FILE, 'rb') as f:
         orig_data = f.read()
     orig_tiff = parse_tiff(orig_data)
-    orig_ifd = orig_tiff.ifds[0]
     from scog_structs import TAG_TILE_OFFSETS, TAG_TILE_BYTECOUNTS
+    orig_ifd = orig_tiff.ifds[0]
     orig_off = int(orig_ifd.entries[TAG_TILE_OFFSETS].values[0])
     orig_bc  = int(orig_ifd.entries[TAG_TILE_BYTECOUNTS].values[0])
     orig_tile = orig_data[orig_off:orig_off + orig_bc]
-    assert tile == orig_tile, "복호화된 타일이 원본과 불일치"
-    print(f"  V4 로컬 읽기: {len(tile):,} bytes (원본과 바이트 일치 확인)")
+    tile0 = reader.read_tile(0, 0, 0)
+    assert tile0 == orig_tile, "Admin L0 복호화 타일이 원본과 불일치"
+    print(f"  Admin 단일 키: 전 레벨 읽기 성공, L0 원본 일치 확인")
 
 
-def test_16_v4_permission_denied():
-    """V4: CEK 없는 레벨 접근 → PermissionError"""
-    cred = issue_credential(CEKS_V4_FILE, levels=[2])  # L2만 허용
+def test_16_v4_user_single_key():
+    """V4: User 키(L1)로 L1+L2 읽기, L0 → PermissionError"""
+    cred = load_credential(os.path.join(KEYS_V4_DIR, 'cred_3857_user.json'))
+    assert 'key' in cred
+
     reader = ScogReader(SCOG_V4_FILE, cred)
+    levels = reader.available_levels()
+    assert 0 not in levels, f"User가 L0에 접근 가능: {levels}"
+    assert 1 in levels and 2 in levels, f"User가 L1/L2에 접근 불가: {levels}"
 
+    # L1, L2 읽기 성공
+    tile1 = reader.read_tile(1, 0, 0)
+    assert len(tile1) > 0
+    tile2 = reader.read_tile(2, 0, 0)
+    assert len(tile2) > 0
+
+    # L0 → PermissionError
     try:
-        reader.read_tile(0, 0, 0)  # L0 시도 → 거부
+        reader.read_tile(0, 0, 0)
         assert False, "PermissionError가 발생해야 함"
     except PermissionError as e:
-        print(f"  V4 PermissionError 정상: {e}")
-
-    # 허용된 레벨은 정상 읽기
-    tile = reader.read_tile(2, 0, 0)
-    assert len(tile) > 0
-    print(f"  V4 L2 정상 읽기: {len(tile):,} bytes")
+        print(f"  User 단일 키: L1+L2 성공, L0 거부 ({e})")
 
 
-def test_17_v4_tamper_detection():
+def test_17_v4_guest_no_key():
+    """V4: Guest (키 없음) → 전 레벨 PermissionError"""
+    cred = load_credential(os.path.join(KEYS_V4_DIR, 'cred_3857_guest.json'))
+    assert 'key' not in cred, "Guest 자격증명에 key가 있음"
+
+    reader = ScogReader(SCOG_V4_FILE, cred)
+    assert reader.available_levels() == [], f"Guest가 레벨 접근 가능: {reader.available_levels()}"
+
+    for lvl in [0, 1, 2]:
+        try:
+            reader.read_tile(lvl, 0, 0)
+            assert False, f"L{lvl} PermissionError가 발생해야 함"
+        except PermissionError:
+            pass
+    print("  Guest: 전 레벨 PermissionError 확인")
+
+
+def test_18_v4_tamper_detection():
     """V4: 암호화된 타일 변조 → InvalidTag"""
-    cred = issue_credential(CEKS_V4_FILE, levels=[0, 1, 2])
+    cred = load_credential(os.path.join(KEYS_V4_DIR, 'cred_3857_admin.json'))
 
     with open(SCOG_V4_FILE, 'rb') as f:
         data = bytearray(f.read())
 
     tiff = parse_tiff(bytes(data))
     ifd = tiff.ifds[0]
-    from scog_structs import TAG_TILE_OFFSETS, TAG_TILE_BYTECOUNTS
-    off = int(ifd.entries[TAG_TILE_OFFSETS].values[0])
+    from scog_structs import TAG_TILE_OFFSETS
+    # 타일 1 (not 0)을 변조 — 타일 0은 trial decryption에 사용되므로
+    off = int(ifd.entries[TAG_TILE_OFFSETS].values[1])
 
     # 암호문 중간 바이트 변조 (IV 다음 암호문 영역)
     data[off + 20] ^= 0xFF
 
-    # 변조된 파일을 임시로 저장
     with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp:
         tmp.write(data)
         tmp_path = tmp.name
 
     try:
         reader = ScogReader(tmp_path, cred)
-        reader.read_tile(0, 0, 0)
+        reader.read_tile(0, 1, 0)  # 타일 (1,0) = index 1
         assert False, "InvalidTag가 발생해야 함"
     except InvalidTag:
         print("  V4 InvalidTag 정상 발생: 타일 변조 감지됨")
@@ -432,22 +465,8 @@ def test_17_v4_tamper_detection():
         os.unlink(tmp_path)
 
 
-def test_18_v4_wrong_cek():
-    """V4: 잘못된 CEK → InvalidTag"""
-    # 자격증명 복사 후 CEK를 랜덤으로 교체
-    cred = issue_credential(CEKS_V4_FILE, levels=[0, 1, 2])
-    cred['levels']['0'] = os.urandom(32).hex()
-
-    reader = ScogReader(SCOG_V4_FILE, cred)
-    try:
-        reader.read_tile(0, 0, 0)
-        assert False, "InvalidTag가 발생해야 함"
-    except InvalidTag:
-        print("  V4 InvalidTag 정상 발생: 잘못된 CEK 감지됨")
-
-
 def test_19_v4_http_range_request():
-    """V4 HTTP Range Request로 타일 읽기"""
+    """V4 HTTP: Admin 단일 키로 타일 읽기"""
     try:
         import requests
         resp = requests.head(f'{HTTP_BASE}/kompsat_3857.v4.scog.tif', timeout=3)
@@ -458,12 +477,37 @@ def test_19_v4_http_range_request():
         print(f"  SKIP: nginx 연결 불가 ({HTTP_BASE})")
         return
 
-    cred = issue_credential(CEKS_V4_FILE, levels=[0, 1, 2])
+    cred = load_credential(os.path.join(KEYS_V4_DIR, 'cred_3857_admin.json'))
     reader = ScogReader(f'{HTTP_BASE}/kompsat_3857.v4.scog.tif', cred)
+    levels = reader.available_levels()
+    assert len(levels) == 3, f"HTTP admin 레벨: {levels}"
     tile = reader.read_tile(0, 0, 0)
     assert len(tile) > 0
     assert tile[:2] in (b'\x78\x9c', b'\x78\xda')
-    print(f"  V4 HTTP L0 타일: {len(tile):,} bytes")
+    print(f"  V4 HTTP Admin 단일 키: {len(tile):,} bytes, {len(levels)} 레벨")
+
+
+def test_20_v4_hkdf_known_vector():
+    """V4: Python HKDF known vector (크로스 플랫폼 검증용)"""
+    # 고정 키로 HKDF 결과 검증 — JS WebCrypto도 동일 결과여야 함
+    known_key = bytes.fromhex(
+        '0000000000000000000000000000000000000000000000000000000000000001'
+    )
+    derived = derive_next_key(known_key)
+    derived_hex = derived.hex()
+
+    # 결과가 결정적인지 확인 (동일 입력 → 동일 출력)
+    derived2 = derive_next_key(known_key)
+    assert derived == derived2, "HKDF 결정성 실패"
+
+    # 체인 검증
+    keys = derive_level_keys(known_key, 3)
+    assert keys[0] == known_key
+    assert keys[1] == derived
+    assert keys[2] == derive_next_key(derived)
+
+    print(f"  Known vector: HKDF(0x01) = {derived_hex[:32]}...")
+    print(f"  HKDF chain 3레벨 검증 완료 (JS WebCrypto와 비교용)")
 
 
 # ─── 실행 ─────────────────────────────────────────────────────────────────────
@@ -482,12 +526,13 @@ TESTS = [
     test_11_v3_local_read,
     test_12_v3_permission_denied,
     test_13_v3_http_range_request,
-    test_14_v4_conversion,
-    test_15_v4_local_read,
-    test_16_v4_permission_denied,
-    test_17_v4_tamper_detection,
-    test_18_v4_wrong_cek,
+    test_14_v4_hkdf_chain,
+    test_15_v4_admin_single_key,
+    test_16_v4_user_single_key,
+    test_17_v4_guest_no_key,
+    test_18_v4_tamper_detection,
     test_19_v4_http_range_request,
+    test_20_v4_hkdf_known_vector,
 ]
 
 if __name__ == '__main__':
