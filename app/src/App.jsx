@@ -2,6 +2,7 @@ import { useState } from "react";
 import SCOGDemo from "./pages/SCOGDemo.jsx";
 import SCOGv2Demo from "./pages/SCOGv2Demo.jsx";
 import SCOGv3Demo from "./pages/SCOGv3Demo.jsx";
+import SCOGv4Demo from "./pages/SCOGv4Demo.jsx";
 import ZoomViewer from "./pages/ZoomViewer.jsx";
 
 export default function App() {
@@ -35,6 +36,12 @@ export default function App() {
           >
             SCOG v3 (1-Request)
           </button>
+          <button
+            className={`nav-tab ${version === "v4" ? "active" : ""}`}
+            onClick={() => setVersion("v4")}
+          >
+            SCOG v4 (타일 암호화)
+          </button>
         </div>
       </nav>
 
@@ -66,6 +73,10 @@ export default function App() {
         {version === "v3" && subPage === "tiles" && <SCOGv3Demo />}
         {version === "v3" && subPage === "zoom" && (
           <ZoomViewer key="v3-zoom" version="v3" />
+        )}
+        {version === "v4" && subPage === "tiles" && <SCOGv4Demo />}
+        {version === "v4" && subPage === "zoom" && (
+          <ZoomViewer key="v4-zoom" version="v4" />
         )}
       </div>
     </div>

@@ -54,8 +54,9 @@ def issue_credential(cek_store_path: str, levels: list,
     with open(cek_store_path) as f:
         store = json.load(f)
 
-    is_v3 = 'scog_block_offset' in store
-    is_v2 = 'public_level' in store and not is_v3
+    is_v4 = store.get('format') == 'v4'
+    is_v3 = 'scog_block_offset' in store and not is_v4
+    is_v2 = 'public_level' in store and not is_v3 and not is_v4
 
     available = set(store['levels'].keys())
     requested = set(str(l) for l in levels)
@@ -69,7 +70,16 @@ def issue_credential(cek_store_path: str, levels: list,
                         for lvl in sorted(requested)
                         if lvl in level_meta_store}
 
-    if is_v3:
+    if is_v4:
+        # v4: 자격증명에 level_meta 없음 — 클라이언트가 TIFF IFD에서 직접 파싱
+        cred = {
+            'file_id':      store['file_id'],
+            'format':       'v4',
+            'encrypt_size': store.get('encrypt_size', 1024),
+            'levels':       {lvl: store['levels'][lvl] for lvl in sorted(requested)},
+        }
+        fmt_label = 'v4'
+    elif is_v3:
         # v3: 자격증명에 public_level/level_meta 없음 — 클라이언트가 TIFF IFD에서 발견
         cred = {
             'file_id':           store['file_id'],

@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from scog_structs import (
     parse_scog_block, decrypt_level, encrypt_level, serialize_scog_block,
     parse_tiff, zero_tile_offsets,
+    encrypt_tile_partial, decrypt_tile_partial,
 )
 from cog_to_scog import cog_to_scog
 from cred_issuer import issue_credential, load_credential, get_cek
@@ -326,6 +327,145 @@ def test_13_v3_http_range_request():
     print(f"  V3 HTTP L0 타일: {len(tile):,} bytes")
 
 
+# ─── v4 테스트 ─────────────────────────────────────────────────────────────────
+
+SCOG_V4_FILE = os.path.join(SCOG_DIR, 'data', 'kompsat_3857.v4.scog.tif')
+KEYS_V4_DIR  = os.path.join(SCOG_DIR, 'keys', 'v4')
+CEKS_V4_FILE = os.path.join(KEYS_V4_DIR, 'kompsat_3857_ceks.json')
+
+
+def test_14_v4_conversion():
+    """V4: COG → SCOG v4 변환 + 타일 데이터 암호화 확인"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_scog = os.path.join(tmpdir, 'test.v4.scog.tif')
+        tmp_keys = os.path.join(tmpdir, 'keys')
+
+        cek_data = cog_to_scog(COG_FILE, tmp_scog, tmp_keys, format_ver='v4')
+        assert cek_data.get('format') == 'v4'
+        assert cek_data.get('encrypt_size') == 1024
+
+        # 출력 파일이 유효한 TIFF인지 확인
+        with open(tmp_scog, 'rb') as f:
+            data = f.read()
+        assert data[:2] in (b'II', b'MM'), f"TIFF 매직 오류: {data[:2]!r}"
+        tiff = parse_tiff(data)
+        assert len(tiff.ifds) >= 2
+
+        # 암호화된 타일은 DEFLATE 매직(78 9c/78 da)이 아님
+        ifd = tiff.ifds[0]
+        from scog_structs import TAG_TILE_OFFSETS, TAG_TILE_BYTECOUNTS
+        off = int(ifd.entries[TAG_TILE_OFFSETS].values[0])
+        bc  = int(ifd.entries[TAG_TILE_BYTECOUNTS].values[0])
+        tile_raw = data[off:off + bc]
+        # 앞 12바이트는 IV, 13~14바이트는 암호문 (DEFLATE 매직이면 안 됨)
+        assert tile_raw[12:14] != b'\x78\x9c', "암호화된 타일이 평문 DEFLATE 시작 — 암호화 실패"
+        print(f"  V4 변환 확인: {len(data):,} bytes, {len(tiff.ifds)} IFDs, 타일 암호화됨")
+
+
+def test_15_v4_local_read():
+    """V4 로컬: 유효 자격증명으로 타일 읽기 + 원본과 일치 확인"""
+    cred = issue_credential(CEKS_V4_FILE, levels=[0, 1, 2])
+    reader = ScogReader(SCOG_V4_FILE, cred)
+
+    tile = reader.read_tile(0, 0, 0)
+    assert len(tile) > 0, "타일 데이터가 비어있음"
+    assert tile[:2] in (b'\x78\x9c', b'\x78\xda'), \
+        f"복호화된 타일이 DEFLATE가 아님: {tile[:4].hex()}"
+
+    # 원본 COG 타일과 비교
+    with open(COG_FILE, 'rb') as f:
+        orig_data = f.read()
+    orig_tiff = parse_tiff(orig_data)
+    orig_ifd = orig_tiff.ifds[0]
+    from scog_structs import TAG_TILE_OFFSETS, TAG_TILE_BYTECOUNTS
+    orig_off = int(orig_ifd.entries[TAG_TILE_OFFSETS].values[0])
+    orig_bc  = int(orig_ifd.entries[TAG_TILE_BYTECOUNTS].values[0])
+    orig_tile = orig_data[orig_off:orig_off + orig_bc]
+    assert tile == orig_tile, "복호화된 타일이 원본과 불일치"
+    print(f"  V4 로컬 읽기: {len(tile):,} bytes (원본과 바이트 일치 확인)")
+
+
+def test_16_v4_permission_denied():
+    """V4: CEK 없는 레벨 접근 → PermissionError"""
+    cred = issue_credential(CEKS_V4_FILE, levels=[2])  # L2만 허용
+    reader = ScogReader(SCOG_V4_FILE, cred)
+
+    try:
+        reader.read_tile(0, 0, 0)  # L0 시도 → 거부
+        assert False, "PermissionError가 발생해야 함"
+    except PermissionError as e:
+        print(f"  V4 PermissionError 정상: {e}")
+
+    # 허용된 레벨은 정상 읽기
+    tile = reader.read_tile(2, 0, 0)
+    assert len(tile) > 0
+    print(f"  V4 L2 정상 읽기: {len(tile):,} bytes")
+
+
+def test_17_v4_tamper_detection():
+    """V4: 암호화된 타일 변조 → InvalidTag"""
+    cred = issue_credential(CEKS_V4_FILE, levels=[0, 1, 2])
+
+    with open(SCOG_V4_FILE, 'rb') as f:
+        data = bytearray(f.read())
+
+    tiff = parse_tiff(bytes(data))
+    ifd = tiff.ifds[0]
+    from scog_structs import TAG_TILE_OFFSETS, TAG_TILE_BYTECOUNTS
+    off = int(ifd.entries[TAG_TILE_OFFSETS].values[0])
+
+    # 암호문 중간 바이트 변조 (IV 다음 암호문 영역)
+    data[off + 20] ^= 0xFF
+
+    # 변조된 파일을 임시로 저장
+    with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp:
+        tmp.write(data)
+        tmp_path = tmp.name
+
+    try:
+        reader = ScogReader(tmp_path, cred)
+        reader.read_tile(0, 0, 0)
+        assert False, "InvalidTag가 발생해야 함"
+    except InvalidTag:
+        print("  V4 InvalidTag 정상 발생: 타일 변조 감지됨")
+    finally:
+        os.unlink(tmp_path)
+
+
+def test_18_v4_wrong_cek():
+    """V4: 잘못된 CEK → InvalidTag"""
+    # 자격증명 복사 후 CEK를 랜덤으로 교체
+    cred = issue_credential(CEKS_V4_FILE, levels=[0, 1, 2])
+    cred['levels']['0'] = os.urandom(32).hex()
+
+    reader = ScogReader(SCOG_V4_FILE, cred)
+    try:
+        reader.read_tile(0, 0, 0)
+        assert False, "InvalidTag가 발생해야 함"
+    except InvalidTag:
+        print("  V4 InvalidTag 정상 발생: 잘못된 CEK 감지됨")
+
+
+def test_19_v4_http_range_request():
+    """V4 HTTP Range Request로 타일 읽기"""
+    try:
+        import requests
+        resp = requests.head(f'{HTTP_BASE}/kompsat_3857.v4.scog.tif', timeout=3)
+        if resp.status_code != 200:
+            print(f"  SKIP: nginx 미응답 (HTTP {resp.status_code})")
+            return
+    except Exception:
+        print(f"  SKIP: nginx 연결 불가 ({HTTP_BASE})")
+        return
+
+    cred = issue_credential(CEKS_V4_FILE, levels=[0, 1, 2])
+    reader = ScogReader(f'{HTTP_BASE}/kompsat_3857.v4.scog.tif', cred)
+    tile = reader.read_tile(0, 0, 0)
+    assert len(tile) > 0
+    assert tile[:2] in (b'\x78\x9c', b'\x78\xda')
+    print(f"  V4 HTTP L0 타일: {len(tile):,} bytes")
+
+
 # ─── 실행 ─────────────────────────────────────────────────────────────────────
 
 TESTS = [
@@ -342,6 +482,12 @@ TESTS = [
     test_11_v3_local_read,
     test_12_v3_permission_denied,
     test_13_v3_http_range_request,
+    test_14_v4_conversion,
+    test_15_v4_local_read,
+    test_16_v4_permission_denied,
+    test_17_v4_tamper_detection,
+    test_18_v4_wrong_cek,
+    test_19_v4_http_range_request,
 ]
 
 if __name__ == '__main__':

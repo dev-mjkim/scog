@@ -7,9 +7,9 @@ import ImageLayer   from 'ol/layer/Image.js';
 import ImageStatic  from 'ol/source/ImageStatic.js';
 import { fromLonLat } from 'ol/proj.js';
 
-import { SCOGClient } from '../lib/scog-client.js';
+import { SCOGClient, formatBytes } from '../lib/scog-client.js';
 import { COGClient }  from '../lib/cog-client.js';
-import { CREDENTIALS, CREDENTIALS_V2, CREDENTIALS_V3, SCOG_URL, SCOG_V2_URL, SCOG_V3_URL, COG_URL, EXTENT } from '../credentials.js';
+import { CREDENTIALS, CREDENTIALS_V2, CREDENTIALS_V3, CREDENTIALS_V4, SCOG_URL, SCOG_V2_URL, SCOG_V3_URL, SCOG_V4_URL, COG_URL, EXTENT } from '../credentials.js';
 
 // ─── 레벨 선택 로직 ──────────────────────────────────────────────────────────
 function bestLevel(resolution, levelResMap) {
@@ -32,12 +32,17 @@ const TIER_META_V2 = {
   guest: { icon: '🌐', name: 'Guest', levels: [2] },
 };
 const TIER_META_V3 = TIER_META_V2;
+const TIER_META_V4 = {
+  admin: { icon: '👑', name: 'Admin', levels: [0, 1, 2] },
+  user:  { icon: '👤', name: 'User',  levels: [1, 2] },
+  guest: { icon: '🌐', name: 'Guest', levels: [2] },
+};
 
 // ─── ZoomViewer 컴포넌트 ──────────────────────────────────────────────────────
 export default function ZoomViewer({ version = 'v1' }) {
-  const TIER_META  = version === 'v3' ? TIER_META_V3 : version === 'v2' ? TIER_META_V2 : TIER_META_V1;
-  const SCOG_CREDS = version === 'v3' ? CREDENTIALS_V3 : version === 'v2' ? CREDENTIALS_V2 : CREDENTIALS;
-  const SCOG_SRC   = version === 'v3' ? SCOG_V3_URL : version === 'v2' ? SCOG_V2_URL : SCOG_URL;
+  const TIER_META  = version === 'v4' ? TIER_META_V4 : version === 'v3' ? TIER_META_V3 : version === 'v2' ? TIER_META_V2 : TIER_META_V1;
+  const SCOG_CREDS = version === 'v4' ? CREDENTIALS_V4 : version === 'v3' ? CREDENTIALS_V3 : version === 'v2' ? CREDENTIALS_V2 : CREDENTIALS;
+  const SCOG_SRC   = version === 'v4' ? SCOG_V4_URL : version === 'v3' ? SCOG_V3_URL : version === 'v2' ? SCOG_V2_URL : SCOG_URL;
   const defaultTier = 'admin';
 
   const mapRef   = useRef(null);
@@ -69,6 +74,7 @@ export default function ZoomViewer({ version = 'v1' }) {
   const [accessibleLevels, setAccessibleLevels] = useState([0, 1, 2]);
   const [switchLog, setSwitchLog] = useState([]);
   const [legend,    setLegend]    = useState({ mode: '—', level: '' });
+  const [decryptTimes, setDecryptTimes] = useState([]);
 
   // ── 지도 초기화 ──────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -144,8 +150,11 @@ export default function ZoomViewer({ version = 'v1' }) {
     setActivePill(lvl);
 
     if (!s.scogCache[lvl]) {
+      // v4: 로그 초기화 후 readFullLevel로 누적
+      if (version === 'v4') s.scogClient.v4DecryptLog = [];
       await s.scogClient.decryptLevel(lvl);
       s.scogCache[lvl] = await s.scogClient.readFullLevel(lvl);
+      if (version === 'v4') setDecryptTimes([...s.scogClient.v4DecryptLog]);
     }
     await swapLayer(s.scogCache[lvl]);
 
@@ -157,7 +166,7 @@ export default function ZoomViewer({ version = 'v1' }) {
       level: `L${lvl} — ${meta.image_width}×${meta.image_height} px`,
     });
     s.currentLvl = lvl;
-  }, [swapLayer, addLog]);
+  }, [swapLayer, addLog, version]);
 
   // ── moveend 핸들러 ────────────────────────────────────────────────────────────
   const onMoveEnd = useCallback(async () => {
@@ -190,6 +199,7 @@ export default function ZoomViewer({ version = 'v1' }) {
     s.cogLevelRes = {}; s.scogLevelRes = {};
     s.currentLvl = null; s.activeMode = null; s.levelLoading = false;
     setSwitchLog([]);
+    setDecryptTimes([]);
     setLegend({ mode: '—', level: '' });
     setActivePill(null);
     setPillRes({});
@@ -340,6 +350,34 @@ export default function ZoomViewer({ version = 'v1' }) {
               })}
             </div>
           </div>
+
+          {/* v4 복호화 성능 */}
+          {version === 'v4' && decryptTimes.length > 0 && (
+            <div className="panel">
+              <div className="panel-title">⚡ 타일별 AES-GCM 복호화</div>
+              <div style={{ fontSize: '11px', color: '#a0aec0', lineHeight: 1.4 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '50px 90px 80px 70px', gap: '2px 6px', marginBottom: '6px', fontWeight: 600, color: '#718096', borderBottom: '1px solid #2d3748', paddingBottom: '4px' }}>
+                  <span>#</span><span>타일</span><span>크기</span><span>복호화</span>
+                </div>
+                {decryptTimes.map((t, i) => (
+                  <div key={i} style={{ display: 'grid', gridTemplateColumns: '50px 90px 80px 70px', gap: '2px 6px' }}>
+                    <span style={{ color: '#718096' }}>tile {t.tileIndex}</span>
+                    <span>L{t.levelId} ({t.col},{t.row})</span>
+                    <span style={{ color: '#90cdf4' }}>{formatBytes(t.encBytes)}</span>
+                    <strong style={{ color: '#68d391' }}>{(t.decryptMs * 1000).toFixed(1)}μs</strong>
+                  </div>
+                ))}
+                <div style={{ borderTop: '1px solid #2d3748', marginTop: '4px', paddingTop: '4px', display: 'grid', gridTemplateColumns: '50px 90px 80px 70px', gap: '2px 6px', color: '#f6ad55' }}>
+                  <span></span>
+                  <span>평균</span>
+                  <span>{formatBytes(Math.round(decryptTimes.reduce((s, t) => s + t.encBytes, 0) / decryptTimes.length))}</span>
+                  <strong>
+                    {(decryptTimes.reduce((s, t) => s + t.decryptMs, 0) / decryptTimes.length * 1000).toFixed(1)}μs
+                  </strong>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* 전환 로그 */}
           <div className="panel" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>

@@ -214,19 +214,32 @@ export class SCOGClient {
     this._offsets   = {};
     this._fileSize  = null;
     this._v3Ifds    = null;
-    this.stats      = { requests: 0, bytesTotal: 0, timeMs: 0 };
+    this._v4Ifds    = null;
+    this.stats          = { requests: 0, bytesTotal: 0, timeMs: 0 };
+    this.lastTileDecrypt = null;
+    this.v4DecryptLog    = [];    // v4: 타일별 복호화 로그 누적
+    this._v4Keys         = {};   // v4: levelId → CryptoKey 캐시
+    this._v4FileIdBytes  = null; // v4: file_id UTF-8 캐시
+  }
+
+  _isV4() {
+    return this.cred.format === 'v4';
   }
 
   _isV3() {
-    return 'scog_block_offset' in this.cred;
+    return 'scog_block_offset' in this.cred && !this._isV4();
   }
 
   _isV2() {
-    return 'public_level' in this.cred && !this._isV3();
+    return 'public_level' in this.cred && !this._isV3() && !this._isV4();
   }
 
   async loadScogBlock() {
     if (this._scogBlock) return;
+    if (this._isV4()) {
+      await this._loadV4();
+      return;
+    }
     if (this._isV3()) {
       await this._loadScogBlockV3();
     } else if (this._isV2()) {
@@ -236,6 +249,18 @@ export class SCOGClient {
       const raw = await this._fetch(0, n, 'SCOG 블록');
       this._scogBlock = parseScogBlock(raw);
     }
+  }
+
+  async _loadV4() {
+    // v4: 16KB fetch → TIFF IFD 파싱 (SCOG 블록 없음)
+    if (this._v4Ifds) return;
+    const raw = await this._fetch(0, 16384, 'SCOG v4 TIFF 헤더 (16KB)');
+    // IFD 체인 파싱 — 첫 IFD offset은 TIFF 헤더에서 읽기
+    const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+    const le = raw[0] === 0x49;
+    const firstIfd = le ? view.getUint32(4, true) : view.getUint32(4, false);
+    this._v4Ifds = parseTiffIFDs(raw, firstIfd);
+    this._scogBlock = { entries: {} };  // 빈 블록 (v4는 SCOG 블록 없음)
   }
 
   async _loadScogBlockV3() {
@@ -278,6 +303,22 @@ export class SCOGClient {
 
   async decryptLevel(levelId) {
     if (this._offsets[levelId]) return this._offsets[levelId];
+
+    // v4: IFD에서 TileOffsets/TileByteCounts 직접 사용
+    if (this._isV4()) {
+      await this.loadScogBlock();
+      if (!this.cred.levels[String(levelId)]) {
+        throw new SCOGPermissionError(levelId, Object.keys(this.cred.levels).map(Number));
+      }
+      const ifd = this._v4Ifds?.[levelId];
+      if (!ifd) throw new Error(`IFD ${levelId} 없음`);
+      const result = {
+        offsets:    (ifd[324] || []).map(BigInt),
+        bytecounts: ifd[325] || new Array((ifd[324] || []).length).fill(0),
+      };
+      this._offsets[levelId] = result;
+      return result;
+    }
 
     // v3: IFD에서 공개/암호화 판단 (public_level 불필요)
     if (this._isV3()) {
@@ -357,11 +398,73 @@ export class SCOGClient {
     const tiffOffset = Number(offsets[idx]);
     const bytecount  = bytecounts[idx];
 
-    // v2/v3: TIFF가 byte 0에서 시작 → fileOffset = tiffOffset
+    // v4/v2/v3: TIFF가 byte 0에서 시작 → fileOffset = tiffOffset
     // v1: [SCOG block][TIFF] → fileOffset = scog_block_size + tiffOffset
-    const fileOffset = (this._isV2() || this._isV3()) ? tiffOffset : (this.cred.scog_block_size + tiffOffset);
+    const fileOffset = (this._isV4() || this._isV2() || this._isV3()) ? tiffOffset : (this.cred.scog_block_size + tiffOffset);
 
-    return this._fetch(fileOffset, bytecount, `L${levelId} 타일(${col},${row})`);
+    const raw = await this._fetch(fileOffset, bytecount, `L${levelId} 타일(${col},${row})`);
+
+    // v4: 타일 복호화
+    if (this._isV4()) {
+      const { decrypted, decryptMs } = await this._decryptTilePartial(raw, levelId, idx);
+      const entry = { levelId, tileIndex: idx, col, row, encBytes: raw.length, decBytes: decrypted.length, decryptMs };
+      this.lastTileDecrypt = entry;
+      this.v4DecryptLog.push(entry);
+      return decrypted;
+    }
+    this.lastTileDecrypt = null;
+    return raw;
+  }
+
+  async _ensureV4Key(levelId) {
+    if (!this._v4Keys[levelId]) {
+      const cek = hexToBytes(this.cred.levels[String(levelId)]);
+      this._v4Keys[levelId] = await crypto.subtle.importKey(
+        'raw', cek, { name: 'AES-GCM' }, false, ['decrypt']
+      );
+    }
+    if (!this._v4FileIdBytes) {
+      this._v4FileIdBytes = new TextEncoder().encode(this.cred.file_id);
+    }
+  }
+
+  async _decryptTilePartial(encTile, levelId, tileIndex) {
+    // 키/fileId 사전 준비 (캐시됨 — 여기서 await 소비)
+    await this._ensureV4Key(levelId);
+    const key         = this._v4Keys[levelId];
+    const fileIdBytes = this._v4FileIdBytes;
+
+    const encryptSize = this.cred.encrypt_size || 1024;
+    const iv     = encTile.slice(0, 12);
+    const actual = Math.min(encryptSize, encTile.length - 28);
+    const ct     = encTile.slice(12, 12 + actual + 16);
+    const tail   = encTile.slice(12 + actual + 16);
+
+    // AAD: file_id + level_id(2B BE) + tile_index(4B BE)
+    const aadBuf = new Uint8Array(fileIdBytes.length + 6);
+    aadBuf.set(fileIdBytes, 0);
+    new DataView(aadBuf.buffer).setUint16(fileIdBytes.length, levelId, false);
+    new DataView(aadBuf.buffer).setUint32(fileIdBytes.length + 2, tileIndex, false);
+
+    // ── 순수 crypto.subtle.decrypt 시간만 측정 ──
+    let head;
+    const t0 = performance.now();
+    try {
+      const plainBuf = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv, additionalData: aadBuf, tagLength: 128 },
+        key, ct
+      );
+      head = new Uint8Array(plainBuf);
+    } catch (e) {
+      throw new SCOGDecryptError(levelId, e.message);
+    }
+    const decryptMs = performance.now() - t0;
+
+    // head + tail 결합
+    const result = new Uint8Array(head.length + tail.length);
+    result.set(head, 0);
+    result.set(tail, head.length);
+    return { decrypted: result, decryptMs };
   }
 
   async readTileAsImage(levelId, col, row) {
@@ -389,6 +492,10 @@ export class SCOGClient {
 
   availableLevels() {
     const levels = new Set(Object.keys(this.cred.levels).map(Number));
+    if (this._isV4()) {
+      // v4: 자격증명의 levels만 (모두 암호화)
+      return [...levels].sort((a, b) => a - b);
+    }
     if (this._isV3()) {
       // v3: IFD에서 공개 레벨 발견 (TileOffsets ≠ 0)
       if (this._v3Ifds) {
@@ -407,6 +514,17 @@ export class SCOGClient {
   }
 
   levelMeta(levelId) {
+    if (this._isV4()) {
+      const ifd = this._v4Ifds?.[levelId];
+      if (!ifd) return null;
+      return {
+        image_width:  ifd[256]?.[0],
+        image_height: ifd[257]?.[0],
+        tile_width:   ifd[322]?.[0],
+        tile_height:  ifd[323]?.[0],
+        tile_count:   ifd[324]?.length || 0,
+      };
+    }
     if (this._isV3()) {
       const ifd = this._v3Ifds?.[levelId];
       if (!ifd) return null;

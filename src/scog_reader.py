@@ -27,6 +27,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from scog_structs import (
     parse_scog_block, decrypt_level, parse_scog_footer,
+    decrypt_tile_partial,
     parse_tiff, parse_ifd,
     TAG_TILE_OFFSETS, TAG_TILE_BYTECOUNTS,
     TAG_IMAGEWIDTH, TAG_IMAGELENGTH, TAG_TILEWIDTH, TAG_TILELENGTH,
@@ -96,16 +97,30 @@ class ScogReader:
         self._cache  = {}            # level_id → (offsets, bytecounts)
         self._v3_ifds = None         # v3: 원본 IFD 리스트 (parse_ifd 결과)
         self._v3_header = None       # v3: 16KB raw 데이터
+        self._v4_tiff = None         # v4: 파싱된 TIFF 구조
+
+    def _is_v4(self) -> bool:
+        return self.cred.get('format') == 'v4'
 
     def _is_v3(self) -> bool:
-        return 'scog_block_offset' in self.cred
+        return 'scog_block_offset' in self.cred and not self._is_v4()
 
     def _is_v2(self) -> bool:
-        return 'public_level' in self.cred and not self._is_v3()
+        return 'public_level' in self.cred and not self._is_v3() and not self._is_v4()
+
+    def _load_v4(self):
+        """v4: 16KB fetch → TIFF IFD 파싱 (SCOG 블록 없음)"""
+        if self._v4_tiff is not None:
+            return
+        raw = self.adapter.read_range(0, 16384)
+        tiff = parse_tiff(bytes(raw))
+        self._v4_tiff = tiff
 
     def _load_scog_block(self):
         if self._scog is not None:
             return
+        if self._is_v4():
+            return  # v4: SCOG 블록 없음
         if self._is_v3():
             self._load_v3()
         elif self._is_v2():
@@ -166,6 +181,23 @@ class ScogReader:
     def _decrypt_level(self, level_id: int):
         if level_id in self._cache:
             return self._cache[level_id]
+
+        # v4: IFD에서 TileOffsets/TileByteCounts 직접 사용 (SCOG 블록 없음)
+        if self._is_v4():
+            self._load_v4()
+            if level_id >= len(self._v4_tiff.ifds):
+                raise IndexError(f"IFD {level_id} 없음 (총 {len(self._v4_tiff.ifds)}개)")
+            # CEK 확인 (없으면 PermissionError)
+            _ = get_cek(self.cred, level_id)
+            ifd = self._v4_tiff.ifds[level_id]
+            off_entry = ifd.entries.get(TAG_TILE_OFFSETS)
+            bc_entry  = ifd.entries.get(TAG_TILE_BYTECOUNTS)
+            if off_entry is None:
+                raise ValueError(f"IFD {level_id}에 TileOffsets 없음")
+            offsets    = [int(v) for v in off_entry.values]
+            bytecounts = [int(v) for v in bc_entry.values] if bc_entry else [0]*len(offsets)
+            self._cache[level_id] = (offsets, bytecounts)
+            return offsets, bytecounts
 
         # v3: IFD의 TileOffsets로 공개 여부 판단 (non-zero = 공개)
         if self._is_v3():
@@ -237,7 +269,9 @@ class ScogReader:
 
     def tile_index(self, level_id: int, col: int, row: int) -> int:
         """(col, row) → flat tile index"""
-        if self._is_v3():
+        if self._is_v4():
+            meta = self.level_info(level_id)
+        elif self._is_v3():
             meta = self._v3_ifd_meta(level_id)
         else:
             meta = self.cred.get('level_meta', {}).get(str(level_id))
@@ -266,14 +300,37 @@ class ScogReader:
         if tiff_offset == 0 or bytecount == 0:
             raise ValueError(f"레벨 {level_id} 타일 ({col},{row})의 offset/bytecount가 0 — 빈 타일")
 
-        if self._is_v2() or self._is_v3():
+        if self._is_v4():
+            file_offset = tiff_offset
+        elif self._is_v2() or self._is_v3():
             file_offset = tiff_offset
         else:
             file_offset = self.cred['scog_block_size'] + tiff_offset
-        return self.adapter.read_range(file_offset, bytecount)
+
+        raw_tile = self.adapter.read_range(file_offset, bytecount)
+
+        # v4: 타일 복호화
+        if self._is_v4():
+            cek = get_cek(self.cred, level_id)
+            encrypt_size = self.cred.get('encrypt_size', 1024)
+            raw_tile = decrypt_tile_partial(raw_tile, cek, self.cred['file_id'],
+                                            level_id, idx, encrypt_size)
+
+        return raw_tile
 
     def level_info(self, level_id: int) -> dict:
         """레벨 메타데이터 반환"""
+        if self._is_v4():
+            self._load_v4()
+            if level_id >= len(self._v4_tiff.ifds):
+                raise IndexError(f"IFD {level_id} 없음")
+            ifd = self._v4_tiff.ifds[level_id]
+            return {
+                'image_width':  get_ifd_scalar(ifd, TAG_IMAGEWIDTH),
+                'image_height': get_ifd_scalar(ifd, TAG_IMAGELENGTH),
+                'tile_width':   get_ifd_scalar(ifd, TAG_TILEWIDTH),
+                'tile_height':  get_ifd_scalar(ifd, TAG_TILELENGTH),
+            }
         if self._is_v3():
             return self._v3_ifd_meta(level_id)
         return self.cred.get('level_meta', {}).get(str(level_id), {})

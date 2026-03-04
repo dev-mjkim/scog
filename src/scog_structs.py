@@ -530,6 +530,37 @@ def write_ifd_tag_values(data: bytearray, tiff: TiffInfo,
         struct.pack_into(tiff.endian + fmt_char, data, base + j * size_each, val)
 
 
+def encrypt_tile_partial(tile_data: bytes, cek: bytes,
+                         file_id: str, level_id: int, tile_index: int,
+                         encrypt_size: int = 1024) -> bytes:
+    """타일 앞 encrypt_size 바이트를 AES-256-GCM으로 암호화.
+
+    결과: [IV 12B][AES-GCM(앞 min(encrypt_size, tile_size)) + tag 16B][나머지 평문...]
+    오버헤드: 28 bytes (IV 12 + tag 16)
+    """
+    actual = min(encrypt_size, len(tile_data))
+    iv = os.urandom(12)
+    aad = file_id.encode() + struct.pack('>H', level_id) + struct.pack('>I', tile_index)
+    head_ct = AESGCM(cek).encrypt(iv, tile_data[:actual], aad)  # actual + 16 bytes (tag)
+    return iv + head_ct + tile_data[actual:]
+
+
+def decrypt_tile_partial(enc_tile: bytes, cek: bytes,
+                         file_id: str, level_id: int, tile_index: int,
+                         encrypt_size: int = 1024) -> bytes:
+    """암호화된 타일 복호화 → 원본 타일 반환.
+
+    enc_tile: [IV 12B][ciphertext + tag 16B][평문 tail...]
+    """
+    iv = enc_tile[:12]
+    actual = min(encrypt_size, len(enc_tile) - 28)  # 원본 encrypt된 부분 크기
+    ct = enc_tile[12:12 + actual + 16]               # ciphertext + 16B tag
+    tail = enc_tile[12 + actual + 16:]
+    aad = file_id.encode() + struct.pack('>H', level_id) + struct.pack('>I', tile_index)
+    head = AESGCM(cek).decrypt(iv, ct, aad)
+    return head + tail
+
+
 def redirect_tiff_first_ifd(data: bytearray, tiff: TiffInfo, new_offset: int) -> None:
     """TIFF 헤더의 첫 IFD 오프셋을 new_offset으로 in-place 변경."""
     if tiff.bigtiff:
